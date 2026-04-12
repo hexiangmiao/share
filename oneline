@@ -1,0 +1,18 @@
+# 如果所有处理都在同一天内完成，可以使用这个简单的版本
+python3 -c "
+import sys, csv
+from datetime import datetime
+
+data = {}
+with open(sys.argv[1]) as f:
+    for line in f:
+        if line.startswith('Processing '):
+            parts = line.split()
+            data[parts[1]] = datetime.strptime(f'{parts[3]} {parts[4]}', '%m/%d/%y %H:%M:%S')
+        elif line.startswith('Done processing '):
+            parts = line.split()
+            if parts[2] in data:
+                end = datetime.strptime(f'{parts[4]} {parts[5]}', '%m/%d/%y %H:%M:%S')
+                duration = (end - data[parts[2]]).total_seconds()
+                print(f'\"{parts[2]}\",{data[parts[2]].strftime(\"%m/%d/%y %H:%M:%S\")},{end.strftime(\"%m/%d/%y %H:%M:%S\")},{duration}')
+" your_log.log > output.csv
