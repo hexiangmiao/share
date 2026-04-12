@@ -1,0 +1,135 @@
+#!/usr/bin/bash
+
+log_file="$1"
+output_csv="${2:-processing_stats.csv}"
+
+# 颜色输出（可选）
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# 检查参数
+if [ $# -lt 1 ]; then
+    echo "用法: $0 <日志文件> [输出CSV文件]"
+    echo "示例: $0 app.log output.csv"
+    exit 1
+fi
+
+if [ ! -f "$log_file" ]; then
+    echo -e "${RED}错误: 找不到日志文件 $log_file${NC}"
+    exit 1
+fi
+
+# 声明关联数组
+declare -A start_times
+declare -A start_epoch
+
+# 写入CSV表头
+echo "文件名,开始时间,结束时间,处理时间(秒)" > "$output_csv"
+
+# 计数器
+count=0
+error_count=0
+
+echo -e "${GREEN}开始处理日志文件...${NC}"
+
+# 读取并处理日志
+while IFS= read -r line; do
+    # 匹配开始日志
+    if [[ $line =~ ^Processing[[:space:]]+([^[:space:]]+)[[:space:]]+at[[:space:]]+([0-9/]+)[[:space:]]+([0-9:]+)$ ]]; then
+        file="${BASH_REMATCH[1]}"
+        date_str="${BASH_REMATCH[2]}"
+        time_str="${BASH_REMATCH[3]}"
+        start_datetime="$date_str $time_str"
+        
+        # 转换为时间戳（使用perl，因为Solaris的date可能不支持-d）
+        start_epoch=$(perl -MTime::Piece -e "print Time::Piece->strptime('$start_datetime', '%m/%d/%y %H:%M:%S')->epoch" 2>/dev/null)
+        
+        if [[ -n "$start_epoch" ]]; then
+            start_times["$file"]="$start_datetime"
+            start_epoch["$file"]="$start_epoch"
+        else
+            echo -e "${YELLOW}警告: 无法解析时间 - $start_datetime${NC}" >&2
+            ((error_count++))
+        fi
+    
+    # 匹配结束日志
+    elif [[ $line =~ ^Done[[:space:]]+processing[[:space:]]+([^[:space:]]+)[[:space:]]+at[[:space:]]+([0-9/]+)[[:space:]]+([0-9:]+)$ ]]; then
+        file="${BASH_REMATCH[1]}"
+        date_str="${BASH_REMATCH[2]}"
+        time_str="${BASH_REMATCH[3]}"
+        end_datetime="$date_str $time_str"
+        
+        # 检查是否有对应的开始记录
+        if [[ -n "${start_epoch[$file]}" ]]; then
+            # 转换结束时间为时间戳
+            end_epoch=$(perl -MTime::Piece -e "print Time::Piece->strptime('$end_datetime', '%m/%d/%y %H:%M:%S')->epoch" 2>/dev/null)
+            
+            if [[ -n "$end_epoch" ]]; then
+                duration=$((end_epoch - start_epoch[$file]))
+                # 写入CSV（使用引号包裹文件名以防有特殊字符）
+                printf "\"%s\",%s,%s,%d\n" "$file" "${start_times[$file]}" "$end_datetime" "$duration" >> "$output_csv"
+                ((count++))
+            else
+                echo -e "${YELLOW}警告: 无法解析结束时间 - $end_datetime${NC}" >&2
+                ((error_count++))
+            fi
+            
+            # 清理已处理的记录
+            unset start_times["$file"]
+            unset start_epoch["$file"]
+        else
+            echo -e "${YELLOW}警告: 找不到文件 $file 的开始记录${NC}" >&2
+            ((error_count++))
+        fi
+    fi
+done < "$log_file"
+
+# 检查未匹配的开始记录
+unmatched=0
+for file in "${!start_times[@]}"; do
+    echo -e "${YELLOW}警告: 文件 $file 有开始记录但没有结束记录${NC}" >&2
+    ((unmatched++))
+done
+
+# 显示统计信息
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}处理完成！${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo "成功处理: $count 个文件"
+echo "警告/错误: $error_count 条"
+echo "未匹配开始记录: $unmatched 条"
+echo "输出文件: $output_csv"
+
+# 显示统计摘要
+if [ $count -gt 0 ]; then
+    echo -e "\n${GREEN}统计摘要:${NC}"
+    echo "========================================"
+    
+    # 使用awk计算统计信息
+    awk -F',' '
+    NR>1 {
+        sum += $4
+        count++
+        if ($4 > max) max = $4
+        if (min == "" || $4 < min) min = $4
+    }
+    END {
+        if (count > 0) {
+            printf "总文件数: %d\n", count
+            printf "总处理时间: %.2f 秒 (%.2f 分钟)\n", sum, sum/60
+            printf "平均处理时间: %.2f 秒\n", sum/count
+            printf "最长处理时间: %.2f 秒\n", max
+            printf "最短处理时间: %.2f 秒\n", min
+        }
+    }
+    ' "$output_csv"
+    
+    # 显示前5个文件
+    echo -e "\n预览前5个文件:"
+    echo "----------------------------------------"
+    head -6 "$output_csv" | tail -5 | while IFS=, read -r file start end duration; do
+        printf "%-20s %8s 秒\n" "$file" "$duration"
+    done
+fi
